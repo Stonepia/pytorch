@@ -90,7 +90,7 @@ class TritonPrinter(PythonPrinter):
 
         import triton.language as tl
 
-        if "propagate_nan" in inspect.signature(tl.math.min).parameters:
+        if "propagate_nan" in inspect.signature(tl.minimum).parameters:
             # tl.PropagateNan.NONE is the default
             propagate_nan_arg = ", tl.PropagateNan.NONE"
         else:
@@ -106,7 +106,7 @@ class TritonPrinter(PythonPrinter):
         mid = len(expr.args) // 2
         a = self._print(sympy.Min(*expr.args[:mid]))
         b = self._print(sympy.Min(*expr.args[mid:]))
-        return f"tl.math.min({a}, {b}{TritonPrinter._propagate_nan_arg()})"
+        return f"tl.minimum({a}, {b}{TritonPrinter._propagate_nan_arg()})"
 
     def _print_Max(self, expr):
         nargs = len(expr.args)
@@ -116,7 +116,7 @@ class TritonPrinter(PythonPrinter):
         mid = len(expr.args) // 2
         a = self._print(sympy.Max(*expr.args[:mid]))
         b = self._print(sympy.Max(*expr.args[mid:]))
-        return f"tl.math.max({a}, {b}{TritonPrinter._propagate_nan_arg()})"
+        return f"tl.maximum({a}, {b}{TritonPrinter._propagate_nan_arg()})"
 
 
 texpr = TritonPrinter().doprint
