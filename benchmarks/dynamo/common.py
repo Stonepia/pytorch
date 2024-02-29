@@ -63,7 +63,9 @@ except ImportError:
     # ignore the error if torch_xla is not installed
     pass
 
+torch._dynamo.config.base_dir = os.path.join(os.environ["TORCHINDUCTOR_CACHE_DIR"])
 torch._inductor.config.triton.unique_kernel_names = True
+torch._inductor.config.kernel_name_max_ops = 10
 log = logging.getLogger(__name__)
 
 # We are primarily interested in TF32
@@ -742,9 +744,19 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
         name = args.profiler_trace_name + "_" + model.name + ".json"
         name = os.path.join(torch._dynamo.config.base_dir, name)
         p.export_chrome_trace(name)
+        print(f"{'###'*15} Eager Mode Kernel Performace Summary {'###'*15}")
         print(p.key_averages().table(sort_by="self_xpu_time_total", row_limit=-1))
-        print(p2.key_averages().table(sort_by="self_xpu_time_total", row_limit=-1))
+
+        print(f"{'###'*15} Graph Mode Kernel Performace Summary {'###'*15}")
+        graph_kernel_summary = p2.key_averages().table(sort_by="self_xpu_time_total", row_limit=-1, max_name_column_width=200) 
+        print(graph_kernel_summary)
+        summary_name = os.path.join(torch._dynamo.config.base_dir, f"graph_table_{model.name}.txt")
+        print(f"kernel Performance Summary table is saved to {summary_name}")
+        with open(summary_name, "a") as file:
+            file.write(graph_kernel_summary)
+
     median = np.median(timings, axis=0)
+    print(f"eager: {median[0]}, inductor: {median[1]}")
     speedup = median[0] / median[1]
     if args.dump_raw_metrics:
         np.save(
@@ -2726,6 +2738,7 @@ def parse_args(args=None):
     parser.add_argument(
         "--export-profiler-trace",
         action="store_true",
+        default=True,
         help="exports trace of kineto profiler",
     )
     parser.add_argument(
