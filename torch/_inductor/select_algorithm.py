@@ -771,18 +771,24 @@ class TritonTemplateKernel(TritonKernel):
         Common boilerplate shared by store_output, _setup_epilogue_hook,
         and load_input.  Returns the contiguous index expression.
         """
-        for name, range_tree_entry in zip(
-            indices, self.range_trees[0].construct_entries(lengths)
-        ):
-            range_tree_entry.set_name(name)
+        entries = list(self.range_trees[0].construct_entries(lengths))
+        for name, entry in zip(indices, entries):
+            old_sym = entry.symbol()
+            entry.set_name(name)
+            new_sym = entry.symbol()
+            if old_sym != new_sym and old_sym in self.range_tree_nodes:
+                self.range_tree_nodes[new_sym] = self.range_tree_nodes.pop(old_sym)
         contiguous_index = sympy_dot(
             ir.FlexibleLayout.contiguous_strides(lengths), index_symbols
         )
         contiguous_index = self.rename_indexing(contiguous_index)
         self.body.writeline(f"{xindex_name} = " + texpr(contiguous_index))
-        self.range_trees[0].lookup(sympy.S.One, sympy_product(lengths)).set_name(
-            xindex_name
-        )
+        xindex_entry = self.range_trees[0].lookup(sympy.S.One, sympy_product(lengths))
+        old_sym = xindex_entry.symbol()
+        xindex_entry.set_name(xindex_name)
+        new_sym = xindex_entry.symbol()
+        if old_sym != new_sym and old_sym in self.range_tree_nodes:
+            self.range_tree_nodes[new_sym] = self.range_tree_nodes.pop(old_sym)
         self.template_mask = mask
         self.template_indices = indices
         return contiguous_index
