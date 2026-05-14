@@ -13278,6 +13278,25 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
                         deterministic=deterministic,
                     )
 
+    def test_deterministic_skip_fill_for_ops(self):
+        # Output buffers of real ops (e.g. add) should not get a deterministic
+        # NaN fill — only truly uninitialized buffers (torch.empty) need it.
+        # The fast path uses device-specific empty_strided_<device>(...) while
+        # the slow deterministic path uses empty_strided(..., device=...).
+        # Op output buffers should take the fast path even under deterministic mode.
+        def fn(a, b):
+            return a + b
+
+        a = torch.randn(4, 4, device=self.device)
+        b = torch.randn(4, 4, device=self.device)
+
+        with DeterministicGuard(True, fill_uninitialized_memory=True):
+            _, code = run_and_get_code(torch.compile(fn, fullgraph=True), a, b)
+            code = " ".join(code)
+            # The slow path emits empty_strided(..., device=...) while the fast
+            # path emits empty_strided_<device>(...) without a device= kwarg.
+            self.assertNotIn("empty_strided(", code)
+
     def test_inplace_resize_as(self):
         def fn(x, y):
             x.resize_as_(y)
