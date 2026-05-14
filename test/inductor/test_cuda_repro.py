@@ -119,9 +119,9 @@ class CudaReproTests(TestCase):
         self.assertEqual(result, expected)
 
     def test_addmm_out_dtype_compile(self):
-        bias = torch.randn(2, 3, device="cuda", dtype=torch.float16)
-        a = torch.randn(2, 4, device="cuda", dtype=torch.float16)
-        b = torch.randn(4, 3, device="cuda", dtype=torch.float16)
+        bias = torch.randn(2, 3, device=device_type, dtype=torch.float16)
+        a = torch.randn(2, 4, device=device_type, dtype=torch.float16)
+        b = torch.randn(4, 3, device=device_type, dtype=torch.float16)
 
         def fn(bias, x, y):
             return torch.addmm(bias, x, y, beta=0.5, alpha=2.0, out_dtype=torch.float32)

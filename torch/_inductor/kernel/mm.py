@@ -149,7 +149,7 @@ aten_addmm = ExternKernelChoice(
 
 aten_addmm_dtype = ExternKernelChoice(
     torch.addmm,
-    "at::_addmm_dtype_out_cuda",
+    "at::addmm_dtype_out",
     name="addmm_dtype",
     op_overload=aten.addmm.dtype_out,
 )
@@ -642,8 +642,8 @@ def tuned_addmm(inp, mat1, mat2, out_dtype=None, *, alpha=1, beta=1, layout=None
             lambda: "input dtypes must be the same",
         )
         torch._check(
-            mat1.get_device().type == "cuda",
-            lambda: "out_dtype is only supported for CUDA",
+            mat1.get_device().type in ("cuda", "xpu"),
+            lambda: "out_dtype is only supported for CUDA or XPU",
         )
         torch._check(
             out_dtype == input_dtype

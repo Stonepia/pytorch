@@ -59,6 +59,7 @@ class ATenConfigHeuristics(TemplateConfigHeuristics):
 # Note (None, op) takes precedence over (device_type, None)
 @register_template_heuristic(aten_addmm.uid, None, op_name="addmm")
 @register_template_heuristic(aten_addmm_dtype.uid, "cuda", op_name="addmm")
+@register_template_heuristic(aten_addmm_dtype.uid, "xpu", op_name="addmm")
 @register_template_heuristic(aten_baddbmm.uid, None, op_name="baddbmm")
 class ATenAddMMConfigHeuristics(ATenConfigHeuristics):
     def get_extra_kwargs(
