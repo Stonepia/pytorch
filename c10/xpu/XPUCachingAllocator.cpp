@@ -1461,11 +1461,27 @@ class DeviceCachingAllocator {
 
     // First, try to get a block from the existing pool.
     bool block_found = get_free_block(params);
+    bool from_pool = block_found;
     // Can't reuse an existing block, try to get a new one.
     if (!block_found) {
-      block_found = alloc_block(params, false, context) ||
-          (release_cached_blocks(context, {0, 0}) &&
-           alloc_block(params, true, context));
+      // Workaround: proactively release cached blocks when reserved exceeds 80%
+      // of device total to prevent over-subscribing into host memory.
+      auto reserved_current =
+          stats.reserved_bytes[static_cast<size_t>(StatType::AGGREGATE)].current;
+      const auto& raw_device = c10::xpu::get_raw_device(device);
+      auto device_total =
+          raw_device.get_info<sycl::info::device::global_mem_size>();
+      if (reserved_current + alloc_size > device_total * 4 / 5) {
+        release_cached_blocks(context, {0, 0});
+        // Retry from pool after releasing
+        block_found = get_free_block(params);
+        from_pool = block_found;
+      }
+      if (!block_found) {
+        block_found = alloc_block(params, false, context) ||
+            (release_cached_blocks(context, {0, 0}) &&
+             alloc_block(params, true, context));
+      }
     }
     if (!block_found) {
       const auto& raw_device = c10::xpu::get_raw_device(device);
