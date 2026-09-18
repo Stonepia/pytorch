@@ -2,6 +2,7 @@
 #include <c10/util/Exception.h>
 #include <c10/xpu/XPUFunctions.h>
 
+#include <algorithm>
 #include <vector>
 
 namespace c10::xpu {
@@ -32,6 +33,9 @@ namespace {
  * 2. If no dGPU is found, identify the first L0 platform containing at least
  *    one iGPU and enumerate all iGPUs on that platform.
  * 3. If neither dGPUs nor iGPUs are found, conclude that no GPUs are available.
+ *
+ * The selected GPUs occupy a contiguous prefix of SYCL platform indices.
+ * Cache device objects at those indices to preserve get_raw_device references.
  */
 thread_local DeviceIndex curDeviceIndex = 0;
 
@@ -42,58 +46,30 @@ struct DevicePool {
 
 void enumDevices(std::vector<std::unique_ptr<sycl::device>>& devices) {
   // See Note [Device Management] for more details.
-  auto platform_list = sycl::platform::get_platforms();
-  auto is_igpu = [](const sycl::device& device) {
-    return device.has(sycl::aspect::ext_oneapi_is_integrated_gpu);
-  };
-
-  // Check if a platform contains at least one GPU (either iGPU or dGPU).
-  auto has_gpu = [&is_igpu](const sycl::platform& platform, bool check_igpu) {
-    // Only consider platforms using the Level Zero backend.
-    if (platform.get_backend() != sycl::backend::ext_oneapi_level_zero) {
-      return false;
-    }
-    // Check if the platform contains at least one GPU.
-    for (const auto& device : platform.get_devices()) {
-      if (device.is_gpu() &&
-          (check_igpu ? is_igpu(device) : !is_igpu(device))) {
-        return true;
+  const auto platform_list = sycl::platform::get_platforms();
+  for (bool check_igpu : {false, true}) {
+    const auto is_target_gpu = [check_igpu](const sycl::device& device) {
+      return device.is_gpu() &&
+          device.has(sycl::aspect::ext_oneapi_is_integrated_gpu) == check_igpu;
+    };
+    for (const auto& platform : platform_list) {
+      if (platform.get_backend() != sycl::backend::ext_oneapi_level_zero) {
+        continue;
       }
-    }
-    // No GPU found on the platform.
-    return false;
-  };
-
-  // Case 1: Platform with dGPU found. Most platforms with dGPU only have dGPU
-  // or a combination of dGPU and iGPU.
-  for (const auto& platform : platform_list) {
-    // Find the first platform that contains at least one dGPU.
-    if (has_gpu(platform, /*check_igpu=*/false)) {
-      for (const auto& device : platform.get_devices()) {
-        // Only add all dGPUs to the device list.
-        if (device.is_gpu() && !is_igpu(device)) {
-          devices.push_back(std::make_unique<sycl::device>(device));
-        }
+      const auto platform_devices = platform.get_devices();
+      const auto count = std::count_if(
+          platform_devices.begin(), platform_devices.end(), is_target_gpu);
+      if (count == 0) {
+        continue;
       }
-      return; // Exit early since we already found a platform with dGPU.
+      devices.reserve(count);
+      for (size_t index = 0; index < static_cast<size_t>(count); ++index) {
+        devices.push_back(std::make_unique<sycl::device>(
+            platform.ext_oneapi_device_at_index(index)));
+      }
+      return;
     }
   }
-
-  // Case 2: No dGPU found, but a platform with iGPU is available.
-  for (const auto& platform : platform_list) {
-    // Find the first platform that contains at least one iGPU.
-    if (has_gpu(platform, /*check_igpu=*/true)) {
-      for (const auto& device : platform.get_devices()) {
-        // Add all iGPUs to the device list.
-        if (device.is_gpu()) { // If the device is a GPU, it must be a iGPU.
-          devices.push_back(std::make_unique<sycl::device>(device));
-        }
-      }
-      return; // Exit early since we already found a platform with iGPU.
-    }
-  }
-
-  // Case 3: No GPUs found (neither dGPU nor iGPU) - Do nothing.
 }
 
 inline void initGlobalDevicePoolState() {
@@ -243,16 +219,18 @@ DeviceIndex get_device_idx_from_pointer(void* ptr) {
       type == sycl::usm::alloc::device, "ptr is not a device type pointer.");
 
   sycl::device raw_device = sycl::get_pointer_device(ptr, get_device_context());
-  auto match_device = [raw_device](const auto& device) -> bool {
-    return raw_device == *device;
-  };
-  auto it = std::find_if(
-      gDevicePool.devices.begin(), gDevicePool.devices.end(), match_device);
-  TORCH_CHECK(
-      it != gDevicePool.devices.end(),
-      "Can't find the pointer from XPU devices.");
-  return static_cast<DeviceIndex>(
-      std::distance(gDevicePool.devices.begin(), it));
+  try {
+    const auto device_index = raw_device.ext_oneapi_index_within_platform();
+    if (device_index < gDevicePool.devices.size()) {
+      return static_cast<DeviceIndex>(device_index);
+    }
+  } catch (const sycl::exception& e) {
+    if (e.code() != sycl::errc::invalid) {
+      throw;
+    }
+  }
+
+  TORCH_CHECK(false, "Can't find the pointer from XPU devices.");
 }
 
 DeviceIndex device_count() {

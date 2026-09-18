@@ -56,12 +56,25 @@ TEST(XPUDeviceTest, PointerGetDevice) {
     return;
   }
 
-  sycl::device& raw_device = c10::xpu::get_raw_device(0);
-  void* ptr =
-      sycl::malloc_device(8, raw_device, c10::xpu::get_device_context());
+  const auto& context = c10::xpu::get_device_context();
+  const auto platform = c10::xpu::get_raw_device(0).get_platform();
+  const auto count = c10::xpu::device_count();
+  for (int device = 0; device < count; ++device) {
+    SCOPED_TRACE(device);
+    auto& raw_device = c10::xpu::get_raw_device(device);
+    const auto sycl_device = platform.ext_oneapi_device_at_index(device);
+    EXPECT_EQ(
+        c10::xpu::get_raw_device(static_cast<c10::DeviceIndex>(device)),
+        raw_device);
+    EXPECT_EQ(sycl_device, raw_device);
+    EXPECT_EQ(
+        raw_device.ext_oneapi_index_within_platform(),
+        static_cast<size_t>(device));
+    void* ptr = sycl::malloc_device(8, sycl_device, context);
 
-  EXPECT_EQ(c10::xpu::get_device_idx_from_pointer(ptr), 0);
-  sycl::free(ptr, c10::xpu::get_device_context());
+    EXPECT_EQ(c10::xpu::get_device_idx_from_pointer(ptr), device);
+    sycl::free(ptr, context);
+  }
 
   int dummy = 0;
   ASSERT_THROW(c10::xpu::get_device_idx_from_pointer(&dummy), c10::Error);
