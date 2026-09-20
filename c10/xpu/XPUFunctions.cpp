@@ -1,10 +1,7 @@
 #include <c10/core/impl/GPUTrace.h>
-#include <c10/util/CallOnce.h>
 #include <c10/util/Exception.h>
 #include <c10/xpu/XPUFunctions.h>
 
-#include <deque>
-#include <optional>
 #include <vector>
 
 namespace c10::xpu {
@@ -40,11 +37,10 @@ thread_local DeviceIndex curDeviceIndex = 0;
 
 struct DevicePool {
   std::vector<std::unique_ptr<sycl::device>> devices;
-  std::deque<c10::once_flag> device_flags;
   std::unique_ptr<sycl::context> context;
 } gDevicePool;
 
-std::optional<sycl::platform> enumDevices(size_t& device_count) {
+void enumDevices(std::vector<std::unique_ptr<sycl::device>>& devices) {
   // See Note [Device Management] for more details.
   auto platform_list = sycl::platform::get_platforms();
   auto is_igpu = [](const sycl::device& device) {
@@ -74,20 +70,12 @@ std::optional<sycl::platform> enumDevices(size_t& device_count) {
     // Find the first platform that contains at least one dGPU.
     if (has_gpu(platform, /*check_igpu=*/false)) {
       for (const auto& device : platform.get_devices()) {
-        // Only count dGPUs on the selected platform.
+        // Only add all dGPUs to the device list.
         if (device.is_gpu() && !is_igpu(device)) {
-          const auto index = device.ext_oneapi_index_within_platform();
-          TORCH_CHECK(
-              index == device_count,
-              "Expected SYCL device index ",
-              device_count,
-              " while enumerating XPU devices, but got ",
-              index,
-              ". XPU devices must form a prefix of the SYCL platform.");
-          ++device_count;
+          devices.push_back(std::make_unique<sycl::device>(device));
         }
       }
-      return platform; // All dGPUs on this platform have been counted.
+      return; // Exit early since we already found a platform with dGPU.
     }
   }
 
@@ -96,63 +84,50 @@ std::optional<sycl::platform> enumDevices(size_t& device_count) {
     // Find the first platform that contains at least one iGPU.
     if (has_gpu(platform, /*check_igpu=*/true)) {
       for (const auto& device : platform.get_devices()) {
-        // Count all iGPUs on the selected platform.
+        // Add all iGPUs to the device list.
         if (device.is_gpu()) { // If the device is a GPU, it must be a iGPU.
-          const auto index = device.ext_oneapi_index_within_platform();
-          TORCH_CHECK(
-              index == device_count,
-              "Expected SYCL device index ",
-              device_count,
-              " while enumerating XPU devices, but got ",
-              index,
-              ". XPU devices must form a prefix of the SYCL platform.");
-          ++device_count;
+          devices.push_back(std::make_unique<sycl::device>(device));
         }
       }
-      return platform; // All iGPUs on this platform have been counted.
+      return; // Exit early since we already found a platform with iGPU.
     }
   }
 
-  // Case 3: No GPUs found (neither dGPU nor iGPU).
-  return std::nullopt;
+  // Case 3: No GPUs found (neither dGPU nor iGPU) - Do nothing.
 }
 
 inline void initGlobalDevicePoolState() {
   // Attempt to initialize XPU devices. If no device is found or the driver is
   // not installed correctly, issue a warning message instead of raising an
   // exception to avoid disrupting the user experience.
-  size_t device_count = 0;
-  std::optional<sycl::platform> platform;
   try {
-    platform = enumDevices(device_count);
+    // Enumerate all GPU devices and record them.
+    enumDevices(gDevicePool.devices);
   } catch (const sycl::exception& e) {
     TORCH_WARN(
         "Failed to initialize XPU devices. The driver may not be installed, installed incorrectly, or incompatible with the current setup. ",
         "Please refer to the guideline (https://github.com/pytorch/pytorch?tab=readme-ov-file#intel-gpu-support) for proper installation and configuration.");
     return;
   }
-  if (!platform) {
+  if (gDevicePool.devices.empty()) {
     TORCH_WARN("XPU device count is zero!");
     return;
   }
   // Ensures that the number of GPU devices does not exceed the maximum
   // allowable value for DeviceIndex.
   TORCH_CHECK(
-      device_count <= std::numeric_limits<DeviceIndex>::max(),
+      gDevicePool.devices.size() <= std::numeric_limits<DeviceIndex>::max(),
       "Too many XPU devices, DeviceIndex overflowed!");
   // Check each device's architecture and issue a warning if it is older than
   // the officially supported range (Intel GPUs starting from Arc (Alchemist)
   // series).
   namespace syclex = sycl::ext::oneapi::experimental;
-  for (const auto& device : platform->get_devices()) {
-    if (device.ext_oneapi_index_within_platform() >= device_count) {
-      continue;
-    }
-    auto architecture = device.get_info<syclex::info::device::architecture>();
+  for (const auto& device : gDevicePool.devices) {
+    auto architecture = device->get_info<syclex::info::device::architecture>();
     if (architecture < syclex::architecture::intel_gpu_acm_g10) {
       TORCH_WARN(
           "The detected GPU (",
-          device.get_info<sycl::info::device::name>(),
+          device->get_info<sycl::info::device::name>(),
           ") is not officially supported by PyTorch XPU. Running workloads on this device may result in unexpected behavior.\n",
           "For stable and fully supported execution, please use GPUs based on Intel Arc (Alchemist) series or newer.\n",
           "Refer to the hardware prerequisites for more information: ",
@@ -160,10 +135,11 @@ inline void initGlobalDevicePoolState() {
     }
   }
 
+  // The default context is utilized for each Intel GPU device, allowing the
+  // retrieval of the context from any GPU device.
+  const auto& platform = gDevicePool.devices[0]->get_platform();
   gDevicePool.context =
-      std::make_unique<sycl::context>(platform->khr_get_default_context());
-  gDevicePool.devices.resize(device_count);
-  gDevicePool.device_flags.resize(device_count);
+      std::make_unique<sycl::context>(platform.khr_get_default_context());
 }
 
 inline void initDevicePoolCallOnce() {
@@ -177,7 +153,7 @@ void initDeviceProperties(DeviceProp* device_prop, DeviceIndex device) {
   using namespace sycl::info;
   using namespace sycl::ext;
   // Get raw sycl device associated with device index.
-  auto& raw_device = get_raw_device(device);
+  auto& raw_device = *gDevicePool.devices[device];
 
   // Initialize the device properties associated with the specific device.
 #define ASSIGN_DEVICE_PROP(property) \
@@ -241,10 +217,6 @@ void initDeviceProperties(DeviceProp* device_prop, DeviceIndex device) {
 sycl::device& get_raw_device(DeviceIndex device) {
   initDevicePoolCallOnce();
   check_device_index(device);
-  c10::call_once(gDevicePool.device_flags[device], [device] {
-    gDevicePool.devices[device] = std::make_unique<sycl::device>(
-        gDevicePool.context->get_platform().ext_oneapi_device_at_index(device));
-  });
   return *gDevicePool.devices[device];
 }
 
@@ -283,7 +255,7 @@ DeviceIndex get_device_idx_from_pointer(void* ptr) {
   }
   TORCH_CHECK(
       index < gDevicePool.devices.size() &&
-          raw_device.get_platform() == context.get_platform(),
+          raw_device == *gDevicePool.devices[index],
       "Can't find the pointer from XPU devices.");
   return static_cast<DeviceIndex>(index);
 }
